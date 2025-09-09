@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NP อาหารแช่แข็ง - รายการสั่งซื้อ (หลังร้าน)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Import Firebase modules ที่จำเป็น
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, query, deleteDoc, getDocs, doc, setDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        
+        // html2canvas is loaded as a global variable directly from CDN, no import needed here.
+        // import html2canvas from "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+
+        let app;
+        let db;
+        let auth;
+        let currentAppId;
+        let userId;
+        
+        // Function to show a custom confirmation modal
+        function showConfirmModal(message) {
+            return new Promise((resolve) => {
+                const confirmModal = document.getElementById('confirmModal');
+                const modalMessage = document.getElementById('modalMessage');
+                const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+                const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+                modalMessage.textContent = message;
+                modalConfirmBtn.style.display = 'inline-block'; // Show confirm button
+                modalCancelBtn.textContent = 'ยกเลิก'; // Reset cancel button text
+                
+                confirmModal.style.display = 'block';
+
+                modalConfirmBtn.onclick = () => {
+                    confirmModal.style.display = 'none';
+                    resolve(true);
+                };
+
+                modalCancelBtn.onclick = () => {
+                    confirmModal.style.display = 'none';
+                    resolve(false);
+                };
+            });
+        }
+
+        // Function to show simple message modal (replaces alert)
+        function showModalMessage(message, type = 'info') {
+            const confirmModal = document.getElementById('confirmModal');
+            const modalMessage = document.getElementById('modalMessage');
+            const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+            const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+            modalMessage.textContent = message;
+            modalConfirmBtn.style.display = 'none'; // Hide confirm button
+            modalCancelBtn.textContent = 'ปิด'; // Change cancel button to 'Close'
+            confirmModal.style.display = 'block';
+            modalCancelBtn.onclick = () => confirmModal.style.display = 'none'; // Close on click
+        }
+        
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                // === START: Firebase Config and Initialization ===
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                    apiKey: "YOUR_ACTUAL_FIREBASE_API_KEY",
+                    authDomain: "food-order-b419e.firebaseapp.com",
+                    projectId: "food-order-b419e",
+                    storageBucket: "food-order-b419e.firebasestorage.app",
+                    messagingSenderId: "785024452468",
+                    appId: "1:785024452468:web:6c159e4bea1f74367c4e21",
+                    measurementId: "G-YVP5NPYG08"
+                };
+
+                currentAppId = typeof __app_id !== 'undefined' ? __app_id : firebaseConfig.projectId;
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                console.log("Firebase app initialized successfully in order.html.");
+                console.log("Current App ID (from order.html):", currentAppId);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated. User ID:", userId);
+                        document.getElementById('currentUserId').textContent = userId; 
+                        setupFirestoreListener();
+                    } else {
+                        console.log("No user signed in. Attempting anonymous sign-in.");
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                            userId = auth.currentUser.uid;
+                            console.log("Anonymous sign-in successful. User ID:", userId);
+                            document.getElementById('currentUserId').textContent = userId;
+                            setupFirestoreListener();
+                        } catch (error) {
+                            console.error("Firebase authentication error in order.html:", error);
+                            document.getElementById('orderList').innerHTML = '<p class="error-message">เกิดข้อผิดพลาดในการยืนยันตัวตนผู้ใช้ ไม่สามารถดึงรายการสั่งซื้อได้</p>';
+                        }
+                    }
+                });
+                // === END: Firebase Config and Initialization ===
+
+                const orderListDiv = document.getElementById('orderList');
+                const clearOrdersButton = document.getElementById('clearOrdersButton');
+
+                function parseDateString(dateString) {
+                    const match = dateString.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s(\d{1,2}):(\d{2}):(\d{2})/);
+                    if (match) {
+                        let day = parseInt(match[1], 10);
+                        let month = parseInt(match[2], 10) - 1;
+                        let year = parseInt(match[3], 10);
+                        let hours = parseInt(match[4], 10);
+                        let minutes = parseInt(match[5], 10);
+                        let seconds = parseInt(match[6], 10);
+                        if (year < 100) {
+                            year += (year < 70) ? 2000 : 1900;
+                        }
+                        return new Date(year, month, day, hours, minutes, seconds);
+                    }
+                    return new Date(dateString.replace(/(\d{2})\.(\d{2})$/, '$1:$2'));
+                }
+
+                function renderOrders(orders) {
+                    orderListDiv.innerHTML = '';
+                    if (orders.length === 0) {
+                        orderListDiv.innerHTML = '<p class="no-orders-message">ยังไม่มีรายการสั่งซื้อในขณะนี้</p>';
+                        return;
+                    }
+
+                    orders.sort((a, b) => {
+                        const dateA = parseDateString(a.timestamp);
+                        const dateB = parseDateString(b.timestamp);
+                        return dateA.getTime() - dateB.getTime();
+                    });
+
+                    let orderIndex = 1;
+                    let currentDate = null;
+
+                    orders.forEach(order => {
+                        const datePartMatch = order.timestamp.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+                        const orderDate = datePartMatch ? datePartMatch[1] : 'Unknown Date';
+
+                        if (orderDate !== currentDate) {
+                            orderIndex = 1;
+                            currentDate = orderDate;
+                            const dateHeading = document.createElement('h2');
+                            dateHeading.textContent = `รายการสั่งซื้อวันที่ ${orderDate}`;
+                            dateHeading.classList.add('date-heading');
+                            orderListDiv.appendChild(dateHeading);
+                        }
+                        
+                        // Default status
+                        const orderStatus = order.status || 'รอยืนยัน'; 
+                        const statusColors = {
+                            'รอยืนยัน': '#ffc107',
+                            'กำลังทำ': '#17a2b8',
+                            'กำลังส่ง': '#007bff',
+                            'ส่งเสร็จแล้ว': '#28a745'
+                        };
+
+                        const orderCard = document.createElement('div');
+                        orderCard.classList.add('order-card');
+                        orderCard.id = `order-${order.id}`;
+
+                        let itemsHtml = '<ul>';
+                        order.items.forEach(item => {
+                            itemsHtml += `<li>${item.name} x ${item.quantity} (${item.price} บาท/ชิ้น)</li>`;
+                        });
+                        itemsHtml += '</ul>';
+
+                        orderCard.innerHTML = `
+                            <div class="status-indicator-container">
+                                <span class="order-number">#${orderIndex++}</span>
+                                <div class="status-indicator" style="background-color: ${statusColors[orderStatus]};">
+                                    ${orderStatus}
+                                </div>
+                            </div>
+                            <h3>Order ID: ${order.customOrderId || order.id}</h3>
+                            <p><strong>วันที่/เวลา:</strong> ${order.timestamp}</p>
+                            <p><strong>ชื่อ-นามสกุล:</strong> ${order.customer.name}</p>
+                            <p><strong>เบอร์โทรศัพท์:</strong> ${order.customer.tel}</p>
+                            <p><strong>ที่อยู่จัดส่ง:</strong> ${order.customer.address}</p>
+                            ${order.customer.room ? `<p><strong>ห้อง/เลขที่:</strong> ${order.customer.room}</p>` : ''}
+                            ${order.customer.floor ? `<p><strong>ชั้น:</strong> ${order.customer.floor}</p>` : ''}
+                            <p><strong>รายการอาหาร:</strong></p>
+                            ${itemsHtml}
+                            <p><strong>รวมทั้งหมด:</strong> ${order.totalAmount} บาท</p>
+                            <p><strong>วิธีการชำระเงิน:</strong> ${order.paymentMethod === 'cash' ? 'เงินสด' : (order.paymentMethod === 'transfer' ? 'โอนเงิน' : 'สแกน QR Code')}</p>
+                            ${order.slipBase64Data ? `<p><strong>สลิปหลักฐาน:</strong><br><img src="${order.slipBase64Data}" style="max-width: 100%; height: auto; border-radius: 8px; margin-top: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" alt="หลักฐานการโอนเงิน"></p>` : '<p><strong>สลิปหลักฐาน:</strong> ไม่พบ</p>'}
+                            <p style="font-size:0.9em; color:#888;">User ID: ${order.userId || 'N/A'}</p>
+                            <div class="card-actions">
+                                <button class="delete-order-btn" data-id="${order.id}">ลบรายการนี้</button>
+                                <button class="save-receipt-image-btn" data-target-id="order-${order.id}" data-order-id="${order.customOrderId || order.id}">บันทึกใบเสร็จเป็นรูปภาพ</button>
+                            </div>
+                            <div class="status-buttons">
+                                <button class="status-btn" data-id="${order.id}" data-status="รอยืนยัน">รอยืนยัน</button>
+                                <button class="status-btn" data-id="${order.id}" data-status="กำลังทำ">กำลังทำ</button>
+                                <button class="status-btn" data-id="${order.id}" data-status="กำลังส่ง">กำลังส่ง</button>
+                                <button class="status-btn" data-id="${order.id}" data-status="ส่งเสร็จแล้ว">ส่งเสร็จแล้ว</button>
+                            </div>
+                        `;
+                        orderListDiv.appendChild(orderCard);
+                    });
+
+                    document.querySelectorAll('.delete-order-btn').forEach(button => {
+                        button.addEventListener('click', async (event) => {
+                            const orderIdToDelete = event.target.dataset.id;
+                            const confirmed = await showConfirmModal('คุณต้องการลบรายการสั่งซื้อนี้ใช่หรือไม่?');
+                            if (confirmed) {
+                                try {
+                                    const orderDocRef = doc(db, `artifacts/${currentAppId}/public/data/orders`, orderIdToDelete);
+                                    await deleteDoc(orderDocRef);
+                                    showModalMessage('ลบรายการสั่งซื้อเรียบร้อยแล้ว', 'success');
+                                } catch (e) {
+                                    console.error("Error deleting document: ", e);
+                                    showModalMessage('เกิดข้อผิดพลาดในการลบรายการสั่งซื้อ', 'error');
+                                }
+                            }
+                        });
+                    });
+
+                    document.querySelectorAll('.save-receipt-image-btn').forEach(button => {
+                        button.addEventListener('click', async (event) => {
+                            const targetId = event.target.dataset.targetId;
+                            const orderId = event.target.dataset.orderId;
+                            const orderCardElement = document.getElementById(targetId);
+                            if (orderCardElement) {
+                                await saveReceiptAsImage(orderCardElement, orderId);
+                            } else {
+                                console.error("Could not find order card element to save:", targetId);
+                                showModalMessage('ไม่พบข้อมูลใบเสร็จที่ต้องการบันทึก', 'error');
+                            }
+                        });
+                    });
+                    
+                    document.querySelectorAll('.status-btn').forEach(button => {
+                        button.addEventListener('click', async (event) => {
+                            const orderId = event.target.dataset.id;
+                            const newStatus = event.target.dataset.status;
+                            const orderDocRef = doc(db, `artifacts/${currentAppId}/public/data/orders`, orderId);
+                            try {
+                                await updateDoc(orderDocRef, {
+                                    status: newStatus
+                                });
+                                showModalMessage(`อัปเดตสถานะเป็น "${newStatus}" เรียบร้อยแล้ว`, 'success');
+                            } catch (e) {
+                                console.error("Error updating status: ", e);
+                                showModalMessage('เกิดข้อผิดพลาดในการอัปเดตสถานะ', 'error');
+                            }
+                        });
+                    });
+                }
+
+                async function saveReceiptAsImage(element, orderId) {
+                    showModalMessage('กำลังสร้างรูปภาพใบเสร็จ...', 'info');
+                    try {
+                        const buttons = element.querySelectorAll('.card-actions, .status-buttons');
+                        buttons.forEach(btn => btn.style.display = 'none');
+                        const canvas = await html2canvas(element, {
+                            scale: 2,
+                            useCORS: true,
+                            logging: false
+                        });
+                        buttons.forEach(btn => btn.style.display = 'flex');
+                        const image = canvas.toDataURL('image/png');
+                        const link = document.createElement('a');
+                        link.href = image;
+                        link.download = `receipt_${orderId}.png`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        showModalMessage('บันทึกรูปภาพใบเสร็จเรียบร้อยแล้ว!', 'success');
+                    } catch (error) {
+                        console.error("Error generating image: ", error);
+                        showModalMessage('เกิดข้อผิดพลาดในการสร้างรูปภาพใบเสร็จ', 'error');
+                    }
+                }
+
+                function setupFirestoreListener() {
+                    if (!db || !currentAppId) {
+                        console.error("Firestore or App ID not available for listener setup.");
+                        document.getElementById('orderList').innerHTML = '<p class="error-message">ระบบยังไม่พร้อมใช้งาน ไม่สามารถดึงรายการสั่งซื้อได้</p>';
+                        return;
+                    }
+                    const ordersCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/orders`);
+                    onSnapshot(ordersCollectionRef, (snapshot) => {
+                        if (snapshot.empty) {
+                            document.getElementById('orderList').innerHTML = '<p class="no-orders-message">ยังไม่มีรายการสั่งซื้อในขณะนี้</p>';
+                            return;
+                        }
+
+                        const orders = [];
+                        snapshot.forEach(doc => {
+                            orders.push({ id: doc.id, ...doc.data() });
+                        });
+                        renderOrders(orders);
+                    }, (error) => {
+                        console.error("Error listening to Firestore:", error);
+                        document.getElementById('orderList').innerHTML = `<p class="error-message">เกิดข้อผิดพลาดในการดึงรายการสั่งซื้อ: ${error.message}</p>`;
+                    });
+                }
+
+                clearOrdersButton.addEventListener('click', async () => {
+                    const confirmed = await showConfirmModal('คุณต้องการล้างรายการสั่งซื้อทั้งหมดใช่หรือไม่?');
+                    if (confirmed) {
+                        try {
+                            const ordersCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/orders`);
+                            const querySnapshot = await getDocs(ordersCollectionRef);
+                            const deletePromises = [];
+                            querySnapshot.forEach((doc) => {
+                                deletePromises.push(deleteDoc(doc.ref));
+                            });
+                            await Promise.all(deletePromises);
+                            showModalMessage('ล้างรายการสั่งซื้อเรียบร้อยแล้ว', 'success');
+                        } catch (e) {
+                            console.error("Error clearing orders: ", e);
+                            showModalMessage('เกิดข้อผิดพลาดในการล้างรายการสั่งซื้อ', 'error');
+                        }
+                    }
+                });
+
+            } catch (mainError) {
+                console.error("An unexpected error occurred during page initialization in order.html:", mainError);
+                document.getElementById('orderList').innerHTML = `<p class="error-message">เกิดข้อผิดพลาดที่ไม่คาดคิดในการโหลดหน้า: ${mainError.message}</p>`;
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Kanit', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            max-width: 100%;
+            margin: 20px auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #d32f2f;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .order-list {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+            padding-bottom: 10px;
+        }
+        .order-card {
+            flex: 0 0 calc(33.33% - 20px);
+            max-width: calc(33.33% - 20px);
+            box-sizing: border-box;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            position: relative;
+            margin-bottom: 20px;
+        }
+        @media (min-width: 1600px) {
+            .order-card {
+                flex: 0 0 calc(16.66% - 17px);
+                max-width: calc(16.66% - 17px);
+            }
+        }
+        @media (min-width: 1200px) and (max-width: 1599px) {
+            .order-card {
+                flex: 0 0 calc(25% - 15px);
+                max-width: calc(25% - 15px);
+            }
+        }
+        @media (min-width: 769px) and (max-width: 1199px) {
+            .order-card {
+                flex: 0 0 calc(33.33% - 20px);
+                max-width: calc(33.33% - 20px);
+            }
+        }
+        @media (max-width: 768px) {
+            .order-card {
+                flex: 0 0 calc(50% - 15px);
+                max-width: calc(50% - 15px);
+            }
+        }
+        @media (max-width: 480px) {
+            .order-card {
+                flex: 0 0 100%;
+                max-width: 100%;
+            }
+            .date-heading {
+                font-size: 1.4em;
+            }
+        }
+        .status-indicator-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .order-number {
+            background-color: #4CAF50;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .status-indicator {
+            padding: 5px 10px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+        }
+        .order-card h3 {
+            color: #d32f2f;
+            margin-top: 0;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #ffebee;
+            padding-bottom: 10px;
+        }
+        .order-card p {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+        .order-card ul {
+            list-style: none;
+            padding: 0;
+            margin-top: 10px;
+            border-top: 1px dashed #eee;
+            padding-top: 10px;
+        }
+        .order-card ul li {
+            margin-bottom: 5px;
+            color: #555;
+        }
+        .no-orders-message, .error-message {
+            text-align: center;
+            color: #777;
+            padding: 20px;
+            border: 1px dashed #ccc;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+            width: 100%;
+        }
+        .error-message {
+            color: #d32f2f;
+            background-color: #ffebee;
+            border-color: #f44336;
+        }
+        .card-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .status-buttons {
+            display: flex;
+            justify-content: space-between;
+            gap: 5px;
+            margin-top: 15px;
+        }
+        .status-btn {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f0f0f0;
+            cursor: pointer;
+            font-size: 0.8em;
+            transition: background-color 0.3s ease;
+        }
+        .status-btn:hover {
+            background-color: #e0e0e0;
+        }
+        .delete-order-btn {
+            background-color: #ff9800;
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.3s ease;
+        }
+        .delete-order-btn:hover {
+            background-color: #fb8c00;
+        }
+        .save-receipt-image-btn {
+            background-color: #2196f3;
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.3s ease;
+        }
+        .save-receipt-image-btn:hover {
+            background-color: #1976d2;
+        }
+        .clear-button-container {
+            text-align: center;
+            margin-top: 30px;
+        }
+        .clear-button {
+            background-color: #f44336;
+            color: white;
+            padding: 12px 25px;
+            border: 2px solid #d32f2f;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        .clear-button:hover {
+            background-color: #d32f2f;
+            border-color: #c62828;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.4);
+            padding-top: 60px;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .modal-buttons {
+            margin-top: 20px;
+        }
+        .modal-buttons button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 0 10px;
+            transition: background-color 0.3s ease;
+        }
+        .modal-buttons button:hover {
+            background-color: #45a049;
+        }
+        .modal-buttons button:last-child {
+            background-color: #f44336;
+        }
+        .modal-buttons button:last-child:hover {
+            background-color: #d32f2f;
+        }
+        .date-heading {
+            width: 100%;
+            text-align: center;
+            margin: 30px 0 15px 0;
+            color: #1a73e8;
+            font-size: 1.8em;
+            font-weight: 600;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
+        }
+        .menu-link {
+            display: block;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 1.2em;
+            color: #1a73e8;
+            text-decoration: none;
+            padding: 10px;
+            border: 2px solid #1a73e8;
+            border-radius: 8px;
+            transition: background-color 0.3s ease;
+        }
+        .menu-link:hover {
+            background-color: #e3f2fd;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>รายการสั่งซื้อ (หลังร้าน)</h1>
+        <p style="text-align: center; font-size: 0.9em; color: #666;">
+            User ID: <span id="currentUserId">กำลังโหลด...</span>
+        </p>
+        <a href="menu.html" class="menu-link">จัดการเมนูอาหาร</a>
+        <div id="orderList" class="order-list">
+            <!-- Order items will be loaded here by JavaScript -->
+            <p class="loading-message">กำลังโหลดรายการสั่งซื้อ...</p>
+        </div>
+        <div class="clear-button-container">
+            <button id="clearOrdersButton" class="clear-button">ล้างรายการสั่งซื้อทั้งหมด</button>
+        </div>
+    </div>
+
+    <!-- The Modal -->
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <p id="modalMessage"></p>
+            <div class="modal-buttons">
+                <button id="modalConfirmBtn">ยืนยัน</button>
+                <button id="modalCancelBtn">ยกเลิก</button>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NP อาหารแช่แข็ง - จัดการเมนู</title>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, query, doc, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        
+        let app;
+        let db;
+        let auth;
+        let currentAppId;
+        let userId;
+
+        // Function to show a custom modal message instead of alert() or confirm()
+        function showModalMessage(message, type = 'info') {
+            const modal = document.getElementById('messageModal');
+            const modalMessage = document.getElementById('modalMessageText');
+            modalMessage.textContent = message;
+            modal.style.display = 'block';
+            document.getElementById('modalCloseBtn').onclick = () => modal.style.display = 'none';
+        }
+
+        // Function to show a custom confirmation modal
+        function showConfirmModal(message) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('confirmModal');
+                const modalMessage = document.getElementById('modalConfirmText');
+                const confirmBtn = document.getElementById('modalConfirmBtn');
+                const cancelBtn = document.getElementById('modalCancelBtn');
+
+                modalMessage.textContent = message;
+                modal.style.display = 'block';
+
+                confirmBtn.onclick = () => {
+                    modal.style.display = 'none';
+                    resolve(true);
+                };
+
+                cancelBtn.onclick = () => {
+                    modal.style.display = 'none';
+                    resolve(false);
+                };
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                // === START: Firebase Config and Initialization ===
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                    apiKey: "YOUR_ACTUAL_FIREBASE_API_KEY",
+                    authDomain: "food-order-b419e.firebaseapp.com",
+                    projectId: "food-order-b419e",
+                    storageBucket: "food-order-b419e.firebasestorage.app",
+                    messagingSenderId: "785024452468",
+                    appId: "1:785024452468:web:6c159e4bea1f74367c4e21",
+                    measurementId: "G-YVP5NPYG08"
+                };
+                currentAppId = typeof __app_id !== 'undefined' ? __app_id : firebaseConfig.projectId;
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        setupFirestoreListener();
+                    } else {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                            userId = auth.currentUser.uid;
+                            setupFirestoreListener();
+                        } catch (error) {
+                            console.error("Firebase authentication error:", error);
+                            showModalMessage('เกิดข้อผิดพลาดในการยืนยันตัวตน ไม่สามารถจัดการเมนูได้', 'error');
+                        }
+                    }
+                });
+                // === END: Firebase Config and Initialization ===
+
+                const menuForm = document.getElementById('menuForm');
+                const menuListDiv = document.getElementById('menuList');
+                const menuIdInput = document.getElementById('menuId');
+                const menuNameInput = document.getElementById('menuName');
+                const menuPriceInput = document.getElementById('menuPrice');
+                const menuImageInput = document.getElementById('menuImage');
+                const menuImageUrlDisplay = document.getElementById('menuImageUrlDisplay');
+                const formTitle = document.getElementById('formTitle');
+                const submitBtn = document.getElementById('submitBtn');
+
+                menuForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const menuId = menuIdInput.value;
+                    const menuName = menuNameInput.value.trim();
+                    const menuPrice = parseFloat(menuPriceInput.value);
+                    const menuImageFile = menuImageInput.files[0];
+                    let menuImageUrl = menuImageUrlDisplay.src; // Keep existing URL if no new file
+
+                    if (!menuName || isNaN(menuPrice)) {
+                        showModalMessage('กรุณาใส่ชื่อและราคาเมนูให้ถูกต้อง');
+                        return;
+                    }
+
+                    if (menuImageFile) {
+                        // Validate file type
+                        if (!['image/jpeg', 'image/png'].includes(menuImageFile.type)) {
+                            showModalMessage('รองรับเฉพาะไฟล์ .png และ .jpeg เท่านั้น');
+                            return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = async (e) => {
+                            menuImageUrl = e.target.result;
+                            await saveMenu(menuId, menuName, menuPrice, menuImageUrl);
+                        };
+                        reader.readAsDataURL(menuImageFile);
+                    } else {
+                        await saveMenu(menuId, menuName, menuPrice, menuImageUrl);
+                    }
+                });
+
+                async function saveMenu(menuId, name, price, imageUrl) {
+                    try {
+                        const menusCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/menus`);
+                        if (menuId) {
+                            const menuDocRef = doc(menusCollectionRef, menuId);
+                            await updateDoc(menuDocRef, { name, price, imageUrl });
+                            showModalMessage('อัปเดตเมนูเรียบร้อยแล้ว');
+                        } else {
+                            await addDoc(menusCollectionRef, { name, price, imageUrl });
+                            showModalMessage('เพิ่มเมนูใหม่เรียบร้อยแล้ว');
+                        }
+                        menuForm.reset();
+                        menuIdInput.value = '';
+                        menuImageUrlDisplay.src = '';
+                        menuImageUrlDisplay.style.display = 'none';
+                        formTitle.textContent = 'เพิ่มเมนูใหม่';
+                        submitBtn.textContent = 'บันทึกเมนู';
+                    } catch (e) {
+                        console.error("Error saving menu: ", e);
+                        showModalMessage('เกิดข้อผิดพลาดในการบันทึกเมนู: ' + e.message, 'error');
+                    }
+                }
+
+                function renderMenus(menus) {
+                    menuListDiv.innerHTML = '';
+                    if (menus.length === 0) {
+                        menuListDiv.innerHTML = '<p class="no-menus">ยังไม่มีรายการเมนูในขณะนี้</p>';
+                        return;
+                    }
+
+                    // Sort menus alphabetically by name
+                    menus.sort((a, b) => a.name.localeCompare(b.name, 'th'));
+
+                    menus.forEach(menu => {
+                        const menuCard = document.createElement('div');
+                        menuCard.classList.add('menu-card');
+                        menuCard.innerHTML = `
+                            <img src="${menu.imageUrl || 'https://placehold.co/200x200/cccccc/333333?text=No+Image'}" onerror="this.onerror=null;this.src='https://placehold.co/200x200/cccccc/333333?text=No+Image';" alt="${menu.name}" class="menu-image">
+                            <div class="menu-info">
+                                <h3>${menu.name}</h3>
+                                <p>ราคา: ${menu.price} บาท</p>
+                                <div class="menu-actions">
+                                    <button class="edit-btn" data-id="${menu.id}">แก้ไข</button>
+                                    <button class="delete-btn" data-id="${menu.id}">ลบ</button>
+                                </div>
+                            </div>
+                        `;
+                        menuListDiv.appendChild(menuCard);
+                    });
+
+                    document.querySelectorAll('.edit-btn').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const menuId = e.target.dataset.id;
+                            const menuToEdit = menus.find(m => m.id === menuId);
+                            if (menuToEdit) {
+                                menuIdInput.value = menuToEdit.id;
+                                menuNameInput.value = menuToEdit.name;
+                                menuPriceInput.value = menuToEdit.price;
+                                if (menuToEdit.imageUrl) {
+                                    menuImageUrlDisplay.src = menuToEdit.imageUrl;
+                                    menuImageUrlDisplay.style.display = 'block';
+                                } else {
+                                    menuImageUrlDisplay.src = '';
+                                    menuImageUrlDisplay.style.display = 'none';
+                                }
+                                formTitle.textContent = 'แก้ไขเมนู';
+                                submitBtn.textContent = 'อัปเดตเมนู';
+                            }
+                        });
+                    });
+
+                    document.querySelectorAll('.delete-btn').forEach(btn => {
+                        btn.addEventListener('click', async (e) => {
+                            const menuId = e.target.dataset.id;
+                            const confirmed = await showConfirmModal('คุณต้องการลบเมนูนี้ใช่หรือไม่?');
+                            if (confirmed) {
+                                try {
+                                    const menuDocRef = doc(db, `artifacts/${currentAppId}/public/data/menus`, menuId);
+                                    await deleteDoc(menuDocRef);
+                                    showModalMessage('ลบเมนูเรียบร้อยแล้ว');
+                                } catch (e) {
+                                    console.error("Error deleting menu: ", e);
+                                    showModalMessage('เกิดข้อผิดพลาดในการลบเมนู: ' + e.message, 'error');
+                                }
+                            }
+                        });
+                    });
+                }
+
+                function setupFirestoreListener() {
+                    if (!db || !currentAppId) {
+                        console.error("Firestore or App ID not available.");
+                        return;
+                    }
+                    const menusCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/menus`);
+                    onSnapshot(menusCollectionRef, (snapshot) => {
+                        const menus = [];
+                        snapshot.forEach(doc => {
+                            menus.push({ id: doc.id, ...doc.data() });
+                        });
+                        renderMenus(menus);
+                    }, (error) => {
+                        console.error("Error listening to Firestore:", error);
+                        showModalMessage('เกิดข้อผิดพลาดในการดึงรายการเมนู');
+                    });
+                }
+
+            } catch (mainError) {
+                console.error("An unexpected error occurred during page initialization:", mainError);
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Kanit', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 20px auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #d32f2f;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-section {
+            background-color: #f9f9f9;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        .form-group input, .form-group button {
+            width: 100%;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            box-sizing: border-box;
+        }
+        .form-group input[type="file"] {
+            padding: 5px;
+        }
+        .form-group button {
+            background-color: #4CAF50;
+            color: white;
+            font-size: 1em;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        .form-group button:hover {
+            background-color: #45a049;
+        }
+        .menu-list-section {
+            background-color: #f9f9f9;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .menu-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        .menu-card {
+            width: 180px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            overflow: hidden;
+            text-align: center;
+        }
+        .menu-image {
+            width: 100%;
+            height: 120px;
+            object-fit: cover;
+            display: block;
+        }
+        .menu-info {
+            padding: 10px;
+        }
+        .menu-info h3 {
+            margin: 0 0 5px 0;
+            font-size: 1.1em;
+        }
+        .menu-info p {
+            margin: 0;
+            font-size: 0.9em;
+            color: #555;
+        }
+        .menu-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+        }
+        .menu-actions button {
+            padding: 5px 10px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+        .edit-btn {
+            background-color: #ffc107;
+            color: #333;
+        }
+        .delete-btn {
+            background-color: #dc3545;
+            color: white;
+        }
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 1.2em;
+            color: #1a73e8;
+            text-decoration: none;
+            padding: 10px;
+            border: 2px solid #1a73e8;
+            border-radius: 8px;
+            transition: background-color 0.3s ease;
+        }
+        .back-link:hover {
+            background-color: #e3f2fd;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.4);
+            padding-top: 60px;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        #messageModal .modal-content, #confirmModal .modal-content {
+            background-color: #fff;
+        }
+        #messageModal button, #confirmModal button {
+            padding: 10px 20px;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+        #modalCloseBtn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #modalConfirmBtn {
+            background-color: #dc3545;
+            color: white;
+        }
+        #modalCancelBtn {
+            background-color: #6c757d;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>จัดการเมนูอาหาร</h1>
+        <a href="setting.html" class="back-link">กลับไปหน้าจัดการออเดอร์</a>
+        <div class="form-section">
+            <h3 id="formTitle">เพิ่มเมนูใหม่</h3>
+            <form id="menuForm">
+                <input type="hidden" id="menuId">
+                <div class="form-group">
+                    <label for="menuName">ชื่อเมนู:</label>
+                    <input type="text" id="menuName" required>
+                </div>
+                <div class="form-group">
+                    <label for="menuPrice">ราคา:</label>
+                    <input type="number" id="menuPrice" step="any" required>
+                </div>
+                <div class="form-group">
+                    <label for="menuImage">รูปภาพ (รองรับ .png, .jpeg):</label>
+                    <input type="file" id="menuImage" accept="image/png, image/jpeg">
+                    <img id="menuImageUrlDisplay" src="" alt="Menu Image Preview" style="max-width: 100%; height: auto; margin-top: 10px; display: none; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                </div>
+                <div class="form-group">
+                    <button type="submit" id="submitBtn">บันทึกเมนู</button>
+                </div>
+            </form>
+        </div>
+        <div class="menu-list-section">
+            <h3>รายการเมนูทั้งหมด</h3>
+            <div id="menuList" class="menu-list">
+                <p class="no-menus">กำลังโหลดรายการเมนู...</p>
+            </div>
+        </div>
+    </div>
+    <div id="messageModal" class="modal">
+        <div class="modal-content">
+            <p id="modalMessageText"></p>
+            <button id="modalCloseBtn" style="margin-top: 15px; padding: 10px 20px; cursor: pointer;">ปิด</button>
+        </div>
+    </div>
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <p id="modalConfirmText"></p>
+            <div style="margin-top: 15px;">
+                <button id="modalConfirmBtn">ยืนยัน</button>
+                <button id="modalCancelBtn">ยกเลิก</button>
+
+            </div>
+        </div>
+    </div>
+</body>
+</html>
